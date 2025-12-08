@@ -1,11 +1,13 @@
 from pymodbus.client import ModbusSerialClient
 import time
 import reg_map
+import logging
 
 # Some default parameters depending on user setup
 DEFAULT_PORT = 'COM3'
 DEFAULT_BAUDRATE = 57600
 DEFAULT_SLAVE_ID = 1
+
   
 
 class SimplexMotor:
@@ -46,7 +48,7 @@ class SimplexMotor:
         if self.debug:
             print("[SimplexMotor] Connected.")
 
-    def read_torque_max(self) -> float:
+    def get_torque_max(self) -> float:
         """
         Return maximum torque (Nm).
         """
@@ -54,7 +56,7 @@ class SimplexMotor:
             raise RuntimeError("Client not connected.")
 
         resp = self.client.read_holding_registers(
-            address = reg_map.REG_TORQUE_MAX, 
+            address = reg_map.MOTOR_TORQUE_MAX, 
             count = 1,
             slave = self.slave_id
         )
@@ -74,7 +76,7 @@ class SimplexMotor:
 
 
 
-    def _read_counters_per_rev(self) -> int:
+    def get_counters_per_rev(self) -> int:
         """
         According to MotorOptions (reg 212) → bit 12-15:
             0 → 4096 counts/rev
@@ -107,15 +109,13 @@ class SimplexMotor:
             return 4096
 
 
-    def read_position_counts(self) -> int:
+    def get_position_counts(self) -> int:
         """
-        Read position feedback in counts (int32) from registers 200 (LSW) and 199 (MSW).
+        Read position feedback in counts. (int32)
         """
         resp = self.client.read_holding_registers(address = reg_map.MOTOR_POSTITION, count = 2, slave = self.slave_id)
-          
-        msw = resp.registers[0] # Register 199
-        lsw = resp.registers[1] # Register 200
-        
+        msw = resp.registers[0]
+        lsw = resp.registers[1]
         raw = msw << 16 | lsw
         print(f"Register Value: 0x{raw:08X}")
         if raw & 0x80000000:
@@ -123,29 +123,87 @@ class SimplexMotor:
         
         return raw
 
-    def read_position(self) -> float:
+    def get_position(self) -> float:
         """
-        Read position feedback in degrees within [0, 360).
+        Read position in degrees with +/- sign.
         """
-        counts = self.read_position_counts()            
-        cpr = float(self._read_counters_per_rev())     
-
+        counts = self.get_position_counts()            
+        cpr = float(self._get_counters_per_rev())
         ang = counts * 360.0 / cpr                      
                                     
-
         return ang
     
+    def get_speed(self) -> float:
+        """
+        Read motor speed in deg/s with +/- sign.
+        """
+        resp = self.client.read_holding_registers(address=reg_map.MOTOR_SPEED, count = 1, slave = self.slave_id)      
+        print(f"Raw Speed Register: 0x{resp.registers[0]:04X}")
+        raw = resp.registers[0] & 0xFFFF
+        if raw & 0x8000:
+            raw -= 0x10000
 
+        cpr = float(self.get_counters_per_rev())  
+        speed_dps = raw * 16.0 * 360.0 / cpr        
 
+        return speed_dps
+    
+    def set_position_resolution(self, mode: int):
+        """
+        set the counters per revolution.
+        mode = 0 → 4096 cpr
+        mode = 1 → 8192 cpr
+        mode = 2 → 16384 cpr
+        """
+        if mode not in (0, 1, 2):
+            raise ValueError("mode must be 0, 1, or 2")
+
+        resp = self.client.read_holding_registers(
+            address = reg_map.MOTOR_OPTIONS,
+            count = 1,
+            slave = self.slave_id,
+        )
+        if resp.isError():
+            raise RuntimeError(f"Read MotorOptions failed: {resp}")
+
+        options = resp.registers[0]
+
+        options_new = (options & 0x0FFF) | (mode << 12)
+        print(f"Setting MotorOptions from 0x{options:04X} to 0x{options_new:04X}")
+
+        wr = self.client.write_register(
+            address = reg_map.MOTOR_OPTIONS,
+            value = options_new,
+            slave = self.slave_id,
+        )
+        if wr.isError():
+            raise RuntimeError(f"Write MotorOptions failed: {wr}")
+        
+    def get_mode(self) -> int:
+        """
+        Get current motor mode.
+        """
+        resp = self.client.read_holding_registers(
+            address = reg_map.MODE,
+            count = 1,
+            slave = self.slave_id,
+        )
+        if resp.isError():
+            raise RuntimeError(f"Read Mode failed: {resp}")
+
+        mode = resp.registers[0]
+        return mode
+    
+    
 if __name__ == "__main__":
     motor = SimplexMotor(debug=True)
     try:
         motor.connect()
+        
+          
         while True:
-            position_counts = motor.read_position_counts()
-            print(f"Position Counts = {position_counts} counts")
-            position_deg = motor.read_position()
-            print(f"Position = {position_deg} deg")
-            time.sleep(0.1)
+            position = motor.get_position()
+            print(f"Position: {position:.2f} deg")
+            time.sleep(1)
     finally:
         motor.close()

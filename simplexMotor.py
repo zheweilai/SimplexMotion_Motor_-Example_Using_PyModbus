@@ -27,6 +27,8 @@ class SimplexMotor:
         self.timeout = timeout 
         self.parity = parity
         self.stopbits = stopbits
+
+        self.cpr = 4096  # Default encoder resolution (counts per revolution)
         
         # Setup Logger
         # Naming convention: ClassName.SlaveID (e.g., SimplexMotor.1)
@@ -57,6 +59,7 @@ class SimplexMotor:
         )
 
         ok = self.client.connect()
+        self.cpr = self.get_counters_per_rev()
         if not ok:
             # Log error before raising exception to ensure audit trail
             self.logger.error(f"Can NOT connect to {self.port}.")
@@ -174,12 +177,8 @@ class SimplexMotor:
             float: Position in degrees (+/-).
         """
         # Fetch raw counts
-        counts = self.get_position_counts()     
-        
-        # Fetch current resolution (Note: this triggers another Modbus read)
-        cpr = float(self.get_counters_per_rev()) 
-        
-        position_deg = counts * 360.0 / cpr                      
+        counts = self.get_position_counts()          
+        position_deg = counts * 360.0 / self.cpr                      
 
         self._log_debug_reg("Position", counts, position_deg, "deg")                            
         return position_deg
@@ -207,13 +206,42 @@ class SimplexMotor:
         else:
             raw_signed = raw  
         
-        cpr = float(self.get_counters_per_rev())  
-        speed_deg_s = raw_signed * 16.0 * 360.0 / cpr        
+          
+        speed_deg_s = raw_signed * 16.0 * 360.0 / self.cpr        
 
         self._log_debug_reg("Speed", raw, speed_deg_s, "deg/s")
 
         return speed_deg_s
     
+    def get_PID_gains(self) -> tuple[float, float, float]:
+        """
+        Read PID gains (Kp, Ki, Kd).
+        Returns:
+            tuple: (Kp, Ki, Kd)
+        """
+        self._check_connection()
+
+        resp = self.client.read_holding_registers(
+            address=reg_map.REG_KP,
+            count=3,
+            slave=self.slave_id,
+        )
+
+        if resp.isError():
+            self._handle_modbus_error(resp, "PID Gains")
+
+        kp = resp.registers[0]
+        ki = resp.registers[1]
+        kd = resp.registers[2]
+
+
+        self._log_debug_reg("Kp", kp, kp, "")
+        self._log_debug_reg("Ki", ki, ki, "")
+        self._log_debug_reg("Kd", kd, kd, "")
+
+        return (kp, ki, kd)
+
+
     def get_mode(self) -> int:
         """
         Get current motor operation mode.
@@ -233,6 +261,56 @@ class SimplexMotor:
         self._log_debug_reg("Mode", mode, mode, "mode")
 
         return mode
+    
+    def get_ramp_speed_max(self) -> float:
+        """
+        Read maximum ramp speed in deg/s.
+        """
+        self._check_connection()
+
+        resp = self.client.read_holding_registers(
+            address=reg_map.RAMP_SPEED_MAX,
+            count=1,
+            slave=self.slave_id,
+        )
+
+        if resp.isError():
+            self._handle_modbus_error(resp, "RampSpeedMax")
+
+        raw = resp.registers[0]
+        ramp_speed_max = raw * 16.0 * 360.0 / self.cpr
+
+        self._log_debug_reg("RampSpeedMax", raw, ramp_speed_max, "deg/s")
+
+        return ramp_speed_max
+    
+    def get_ramp_acc_dec_max(self) -> tuple[float, float]:
+        """
+        Read maximum ramp acceleration and deceleration in deg/s².
+        Returns:
+            tuple: (ramp_acc_max, ramp_dec_max)
+        """
+        self._check_connection()
+
+        resp = self.client.read_holding_registers(
+            address=reg_map.RAMP_ACC_MAX,
+            count=2,
+            slave=self.slave_id,
+        )
+
+        if resp.isError():
+            self._handle_modbus_error(resp, "RampAccDecMax")
+
+        raw_acc = resp.registers[0]
+        raw_dec = resp.registers[1]
+
+        ramp_acc_max = raw_acc * 256 * 360.0 / self.cpr
+        ramp_dec_max = raw_dec * 256 * 360.0 / self.cpr
+
+        self._log_debug_reg("RampAccMax", raw_acc, ramp_acc_max, "deg/s²")
+        self._log_debug_reg("RampDecMax", raw_dec, ramp_dec_max, "deg/s²")
+
+        return (ramp_acc_max, ramp_dec_max)
 
     # =========================================================
     #       Setters Methods
@@ -280,6 +358,8 @@ class SimplexMotor:
         if wr.isError():
             self.logger.error(f"Write MotorOptions failed: {wr}")
             raise RuntimeError(f"Write MotorOptions failed: {wr}")
+        time.sleep(0.02)
+        self.cpr = self.get_counters_per_rev()
     
     def set_target_position_counts(self, target_counts: int):
         """
@@ -312,6 +392,17 @@ class SimplexMotor:
             self.logger.error(f"Write TargetPosition failed: {wr}")
             raise RuntimeError(f"Write TargetPosition failed: {wr}")
     
+    def set_position(self, position_deg: float):
+        """
+        Set target position in degrees.
+        Args:
+            position_deg: Target position in degrees.
+        """
+          
+        target_counts = int(round(position_deg * self.cpr / 360.0))
+
+        self.set_target_position_counts(target_counts)
+        
 
     def set_mode(self, mode: int):
         """
@@ -333,6 +424,109 @@ class SimplexMotor:
             self.logger.error(f"Write Mode failed: {wr}")
             raise RuntimeError(f"Write Mode failed: {wr}")
         
+    def set_PID_gains(self, kp: int, ki: int, kd: int):
+        """
+        Set PID gains (Kp, Ki, Kd).
+        Note: According to the manual, these are raw int16 values, not floats.
+        """
+        self._check_connection()
+
+        
+        for name, val in [("Kp", kp), ("Ki", ki), ("Kd", kd)]:
+            if not (-32768 <= val <= 32767):
+                raise ValueError(f"{name} value {val} is out of int16 range!")
+
+        self._log_change_info("PID_Gains", 0, 0, f"Set Kp={kp}, Ki={ki}, Kd={kd}")
+
+       
+        wr = self.client.write_registers(
+            address=reg_map.REG_KP,
+            values=[kp, ki, kd],
+            slave=self.slave_id,
+        )
+        
+        if wr.isError():
+            self.logger.error(f"Write PID Gains failed: {wr}")
+            raise RuntimeError(f"Write PID Gains failed: {wr}")
+        
+    def set_ramp_speed_max(self, ramp_speed_deg_s: int):
+        """
+        Set maximum ramp speed in deg/s.
+        Args:
+            ramp_speed_deg_s: Ramp speed in deg/s.
+        """
+        self._check_connection()
+
+        # Convert to raw register value
+        raw = int(round(ramp_speed_deg_s * self.cpr / (16.0 * 360.0)))
+
+        self._log_change_info("RampSpeedMax", 0, raw, f"Set to {ramp_speed_deg_s} deg/s")
+
+        wr = self.client.write_register(
+            address=reg_map.RAMP_SPEED_MAX,
+            value=raw,
+            slave=self.slave_id,
+        )
+        if wr.isError():
+            self.logger.error(f"Write RampSpeedMax failed: {wr}")
+            raise RuntimeError(f"Write RampSpeedMax failed: {wr}")
+        
+    def set_ramp_acc_dec_max(self, ramp_acc_deg_s2: int, ramp_dec_deg_s2: int):
+        """
+        Set maximum ramp acceleration and deceleration in deg/s².
+        Args:
+            ramp_acc_deg_s2: Ramp acceleration in deg/s².
+            ramp_dec_deg_s2: Ramp deceleration in deg/s².
+        """
+        self._check_connection()
+
+        # Convert to raw register values
+        raw_acc = int(round(ramp_acc_deg_s2 * self.cpr / (256.0 * 360.0)))
+        raw_dec = int(round(ramp_dec_deg_s2 * self.cpr / (256.0 * 360.0)))
+
+        self._log_change_info("RampAccMax", 0, raw_acc, f"Set to {ramp_acc_deg_s2} deg/s²")
+        self._log_change_info("RampDecMax", 0, raw_dec, f"Set to {ramp_dec_deg_s2} deg/s²")
+
+        wr = self.client.write_registers(
+            address=reg_map.RAMP_ACC_MAX,
+            values=[raw_acc, raw_dec],
+            slave=self.slave_id,
+        )
+        if wr.isError():
+            self.logger.error(f"Write RampAccDecMax failed: {wr}")
+            raise RuntimeError(f"Write RampAccDecMax failed: {wr}")
+
+
+    def beep(self, duration_ms: int = 500):
+        """
+        Make the motor emit a beep sound for a specified duration.
+        Args:
+            duration_ms: Duration of the beep in milliseconds.
+            amplitude: Sound volume (TargetInput) Usually using 100
+        """
+        self._check_connection()
+        amplitude = 100
+        # Log
+        self._log_change_info("Beep", 0, amplitude, f"Beeping for {duration_ms} ms")
+
+        
+        self.client.write_registers(
+            address=reg_map.TARGET_INPUT, 
+            values=[0, amplitude],           
+            slave=self.slave_id
+        )
+
+        
+        self.set_mode(60) 
+
+        
+        time.sleep(duration_ms / 1000.0)
+
+    
+        self.set_mode(0) 
+        
+      
+
 
     # =========================================================
     #       Internal Helpers (Private Methods)

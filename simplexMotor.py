@@ -2,6 +2,7 @@ from pymodbus.client import ModbusSerialClient
 import time
 import reg_map
 import logging
+from typing import Union
 
 # Default communication parameters
 DEFAULT_PORT = 'COM3'
@@ -236,7 +237,7 @@ class SimplexMotor:
     # =========================================================
     #       Setters Methods
     # =========================================================
-    def set_position_resolution(self, mode: int):
+    def set_rev_resolution(self, mode: int):
         """
         Set encoder resolution mode.
         Args:
@@ -279,8 +280,60 @@ class SimplexMotor:
         if wr.isError():
             self.logger.error(f"Write MotorOptions failed: {wr}")
             raise RuntimeError(f"Write MotorOptions failed: {wr}")
-        
     
+    def set_target_position_counts(self, target_counts: int):
+        """
+        Set target position in encoder counts (Int32).
+        Args:
+            target_counts: Target position in counts.
+        """
+        self._check_connection()
+
+        
+        # Convert to unsigned 32-bit representation
+        if target_counts < 0:
+            target_uint32 = target_counts + 0x100000000
+        else:
+            target_uint32 = target_counts
+
+        msw = (target_uint32 >> 16) & 0xFFFF
+        lsw = target_uint32 & 0xFFFF
+
+        # Log the intended change
+        self._log_change_info("TargetPosCnts", 0, target_uint32, f"Set to {target_counts} cnts")
+
+        # Write MSW and LSW to consecutive registers
+        wr = self.client.write_registers(
+            address=reg_map.TARGET_INPUT,
+            values=[msw, lsw],
+            slave=self.slave_id,
+        )
+        if wr.isError():
+            self.logger.error(f"Write TargetPosition failed: {wr}")
+            raise RuntimeError(f"Write TargetPosition failed: {wr}")
+    
+
+    def set_mode(self, mode: int):
+        """
+        Set motor operation mode.
+        Args:
+            mode: Mode value to set.
+        """
+        self._check_connection()
+
+        # Log the intended change
+        self._log_change_info("Mode", 0, mode, f"Set to {mode}")
+
+        wr = self.client.write_register(
+            address = reg_map.MODE,
+            value = mode,
+            slave = self.slave_id,
+        )
+        if wr.isError():
+            self.logger.error(f"Write Mode failed: {wr}")
+            raise RuntimeError(f"Write Mode failed: {wr}")
+        
+
     # =========================================================
     #       Internal Helpers (Private Methods)
     # =========================================================
@@ -302,7 +355,7 @@ class SimplexMotor:
         Format: [Name] Change: 0xOld -> 0xNew | Note
         """
         # Adjusted width to accommodate longer names like 'MotorOptions'
-        NAME_WIDTH = 10 
+        NAME_WIDTH = 12
         
         hex_width = 8 if (old_hex > 0xFFFF or new_hex > 0xFFFF) else 4
         
@@ -311,12 +364,12 @@ class SimplexMotor:
         
         self.logger.info(msg)
 
-    def _log_debug_reg(self, name: str, raw: int, val: float | int, unit: str = ""):
+    def _log_debug_reg(self, name: str, raw: int, val: Union[float, int], unit: str = ""):
         """
         Helper method to format and log register values at DEBUG level.
         Format: [Name] Raw: 0xHex -> Val: Value Unit
         """
-        NAME_WIDTH = 10
+        NAME_WIDTH = 12
         
         hex_width = 8 if raw > 0xFFFF else 4
         

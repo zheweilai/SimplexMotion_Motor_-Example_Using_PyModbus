@@ -6,3 +6,5 @@ MOTOR_TORQUE                = 202
 MOTOR_TORQUE_MAX            = 203
 MOTOR_OPTIONS               = 211
 MODE                        = 399
+MODE_POSITION_RAMP          = 21
+TARGET_INPUT                = 449

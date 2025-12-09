@@ -159,7 +159,7 @@ class SimplexMotor:
         
         # Combine into 32-bit unsigned
         raw_uint32 = (msw << 16) | lsw
-
+        
         # Convert to signed 32-bit integer
         if raw_uint32 & 0x80000000:
             counts = raw_uint32 - 0x100000000
@@ -168,6 +168,9 @@ class SimplexMotor:
         
         # Renamed label to distinguish from 'get_position' (degrees)
         self._log_debug_reg("PosCounts", raw_uint32, counts, "cnts")
+        a = counts
+        a.to_bytes(4, byteorder='big', signed=True)
+        print(a)
         return counts
 
     def get_position(self) -> float:
